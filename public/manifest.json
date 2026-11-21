@@ -1,0 +1,10 @@
+{
+  "name": "Phomemo M250 — Студия Стикеров",
+  "short_name": "M250 Стикеры",
+  "description": "Конструктор наклеек и база шаблонов для термопринтера Phomemo M250 (закрутки, банки, коробки, дом)",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "orientation": "portrait"
+}

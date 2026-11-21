@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  overscroll-behavior-y: none;
+  font-family: 'Rubik', -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+}
+
+/* Custom subtle scrollbars for horizontal chip strips */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+@keyframes printSlide {
+  0% {
+    transform: translateY(35%);
+    opacity: 0.2;
+  }
+  100% {
+    transform: translateY(0%);
+    opacity: 1;
+  }
+}
+
+.animate-print-slide {
+  animation: printSlide 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}

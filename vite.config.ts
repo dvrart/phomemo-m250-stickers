@@ -3,11 +3,114 @@ import react from '@vitejs/plugin-react';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import querystring from 'node:querystring';
 
 const stickerStore = new Map<string, { buffer: Buffer; fileName: string }>();
 
 // Pure ASCII path inside project root to avoid Windows Cyrillic username encoding issues in PowerShell
 const SAFE_JOB_FILE = path.resolve('C:/Projects/olha/.m250_print_job.bin').replace(/\\/g, '/');
+
+function executeM250SerialPrint(
+  rasterBuffer: Buffer,
+  widthBytes: number,
+  heightLines: number,
+  copies: number,
+  protocolMode: string,
+  port: string,
+  cb: (err: Error | null, stdout: string, stderr: string) => void
+) {
+  fs.writeFileSync(SAFE_JOB_FILE, rasterBuffer);
+  const cleanPort = String(port).replace(/[^a-zA-Z0-9]/g, '') || 'COM9';
+  const numCopies = Math.max(1, Math.min(20, Number(copies) || 1));
+  const wB = Number(widthBytes) & 0xff;
+  const hL = Number(heightLines) & 0xff;
+  const hH = (Number(heightLines) >> 8) & 0xff;
+  const isEscMode = protocolMode === 'm-series-esc';
+
+  const psScript = `
+$ErrorActionPreference = 'Stop'
+$raster = [System.IO.File]::ReadAllBytes('${SAFE_JOB_FILE}')
+$sp = New-Object System.IO.Ports.SerialPort '${cleanPort}', 115200, 'None', 8, 'One'
+$sp.WriteTimeout = 10000
+$sp.ReadTimeout = 2000
+$sp.Open()
+try {
+  for ($c = 0; $c -lt ${numCopies}; $c++) {
+    if ($${isEscMode ? 'true' : 'false'}) {
+      # Phomemo M250 verified m-series sequence: ESC @, ESC 7, GS |, GS v 0 (72 bytes), ESC J
+      [byte[]]$cmdInit = @(0x1b, 0x40)
+      $sp.Write($cmdInit, 0, $cmdInit.Length)
+      Start-Sleep -Milliseconds 100
+
+      [byte[]]$cmdHeat = @(0x1b, 0x37, 7, 140, 2)
+      $sp.Write($cmdHeat, 0, $cmdHeat.Length)
+      Start-Sleep -Milliseconds 30
+
+      [byte[]]$cmdDensity = @(0x1d, 0x7c, 6)
+      $sp.Write($cmdDensity, 0, $cmdDensity.Length)
+      Start-Sleep -Milliseconds 50
+    } else {
+      [byte[]]$cmdSetup = @(0x1b, 0x4e, 0x0d, 0x05, 0x1b, 0x4e, 0x04, 0x0c, 0x1f, 0x11, 0x0a)
+      $sp.Write($cmdSetup, 0, $cmdSetup.Length)
+      Start-Sleep -Milliseconds 40
+    }
+
+    [byte[]]$cmdHeader = @(0x1d, 0x76, 0x30, 0x00, ${wB}, 0x00, ${hL}, ${hH})
+    $sp.Write($cmdHeader, 0, $cmdHeader.Length)
+
+    $chunkSize = 128
+    for ($i = 0; $i -lt $raster.Length; $i += $chunkSize) {
+      $len = [Math]::Min($chunkSize, $raster.Length - $i)
+      $sp.Write($raster, $i, $len)
+      Start-Sleep -Milliseconds 18
+    }
+    $sp.BaseStream.Flush()
+
+    Start-Sleep -Milliseconds 300
+    if ($${isEscMode ? 'true' : 'false'}) {
+      [byte[]]$cmdFooter = @(0x1b, 0x4a, 48)
+    } else {
+      [byte[]]$cmdFooter = @(0x1f, 0xf0, 0x05, 0x00, 0x1f, 0xf0, 0x03, 0x00)
+    }
+    $sp.Write($cmdFooter, 0, $cmdFooter.Length)
+    $sp.BaseStream.Flush()
+
+    # Hold Bluetooth RFCOMM connection open for ~5.5 seconds while printer finishes physical printing
+    $waitLoops = 28
+    for ($w = 0; $w -lt $waitLoops; $w++) {
+      Start-Sleep -Milliseconds 200
+      $avail = $sp.BytesToRead
+      if ($avail -gt 0) {
+        $rx = New-Object byte[] $avail
+        $sp.Read($rx, 0, $avail) | Out-Null
+        $hex = [BitConverter]::ToString($rx)
+        Write-Output "RX=$hex"
+        if ($w -ge 15) { break }
+      }
+    }
+  }
+  Write-Output "PRINT_OK"
+} finally {
+  if ($sp.IsOpen) { $sp.Close() }
+}
+`;
+
+  execFile(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command', psScript],
+    { timeout: 45000 },
+    (err, stdout, stderr) => {
+      try {
+        if (fs.existsSync(SAFE_JOB_FILE)) {
+          fs.unlinkSync(SAFE_JOB_FILE);
+        }
+      } catch {
+        // ignore
+      }
+      cb(err, stdout, stderr);
+    }
+  );
+}
 
 function phomemoM250BridgePlugin(): Plugin {
   return {
@@ -15,6 +118,18 @@ function phomemoM250BridgePlugin(): Plugin {
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const url = req.url || '';
+
+        // Enable CORS & Private Network Access so https://dvrart.github.io can also reach local bridge when allowed
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        res.setHeader('Access-Control-Allow-Private-Network', 'true');
+
+        if (req.method === 'OPTIONS') {
+          res.statusCode = 204;
+          res.end();
+          return;
+        }
 
         // 0. Live Phomemo M250 status & battery check on COM9
         if (req.method === 'GET' && url.startsWith('/api/printer-status')) {
@@ -70,7 +185,7 @@ try {
           return;
         }
 
-        // 1. Serve stored PNG sticker images with real HTTP URLs for iPhone Safari/Yandex Browser
+        // 1. Serve stored PNG sticker images
         if (req.method === 'GET' && url.startsWith('/api/sticker/')) {
           const parsed = new URL(url, 'http://localhost');
           const id = parsed.pathname.replace('/api/sticker/', '').replace(/\.png$/i, '');
@@ -92,7 +207,7 @@ try {
           return;
         }
 
-        // 2. Store PNG image from client so iPhone over HTTP has a native <img> / download URL
+        // 2. Store PNG image from client
         if (req.method === 'POST' && url === '/api/prepare-sticker') {
           let body = '';
           req.on('data', (chunk) => {
@@ -127,12 +242,7 @@ try {
           return;
         }
 
-        // 3. Direct Bluetooth SPP printing to Phomemo M250 (paired as COM9 on Windows host)
-        // Exact Wireshark-verified M220/M250 protocol:
-        // - Header: 1B 4E 0D 05 (speed 5), 1B 4E 04 0C (density 12), 1F 11 0A (die-cut label with gaps)
-        // - Single GS v 0: 1D 76 30 00 48 00 <yL> <yH> (widthBytes = 0x48 = 72 bytes = 576 dots)
-        // - Footer: 1F F0 05 00 1F F0 03 00
-        // - Keep RFCOMM socket open while printer physically prints (~5-7s) and drains status reply!
+        // 3. JSON POST to /api/print-m250
         if (req.method === 'POST' && url === '/api/print-m250') {
           let body = '';
           req.on('data', (chunk) => {
@@ -142,95 +252,22 @@ try {
             try {
               const {
                 rasterBase64,
-                widthBytes = 50,
+                widthBytes = 72,
                 heightLines = 240,
                 copies = 1,
-                protocolMode = 'm220-exact',
+                protocolMode = 'm-series-esc',
                 port = 'COM9',
               } = JSON.parse(body);
 
               const rasterBuffer = Buffer.from(rasterBase64, 'base64');
-              fs.writeFileSync(SAFE_JOB_FILE, rasterBuffer);
-
-              const cleanPort = String(port).replace(/[^a-zA-Z0-9]/g, '') || 'COM9';
-              const numCopies = Math.max(1, Math.min(20, Number(copies) || 1));
-              const wB = Number(widthBytes) & 0xff;
-              const hL = Number(heightLines) & 0xff;
-              const hH = (Number(heightLines) >> 8) & 0xff;
-              const isEscMode = protocolMode === 'm-series-esc';
-
-              const psScript = `
-$ErrorActionPreference = 'Stop'
-$raster = [System.IO.File]::ReadAllBytes('${SAFE_JOB_FILE}')
-$sp = New-Object System.IO.Ports.SerialPort '${cleanPort}', 115200, 'None', 8, 'One'
-$sp.WriteTimeout = 10000
-$sp.ReadTimeout = 2000
-$sp.Open()
-try {
-  for ($c = 0; $c -lt ${numCopies}; $c++) {
-    if ($${isEscMode ? 'true' : 'false'}) {
-      [byte[]]$cmdInit = @(0x1b, 0x40)
-      $sp.Write($cmdInit, 0, $cmdInit.Length)
-      Start-Sleep -Milliseconds 80
-      [byte[]]$cmdHeat = @(0x1b, 0x37, 7, 140, 2, 0x1d, 0x7c, 6)
-      $sp.Write($cmdHeat, 0, $cmdHeat.Length)
-      Start-Sleep -Milliseconds 40
-    } else {
-      [byte[]]$cmdSetup = @(0x1b, 0x4e, 0x0d, 0x05, 0x1b, 0x4e, 0x04, 0x0c, 0x1f, 0x11, 0x0a)
-      $sp.Write($cmdSetup, 0, $cmdSetup.Length)
-      Start-Sleep -Milliseconds 40
-    }
-
-    [byte[]]$cmdHeader = @(0x1d, 0x76, 0x30, 0x00, ${wB}, 0x00, ${hL}, ${hH})
-    $sp.Write($cmdHeader, 0, $cmdHeader.Length)
-
-    $chunkSize = 256
-    for ($i = 0; $i -lt $raster.Length; $i += $chunkSize) {
-      $len = [Math]::Min($chunkSize, $raster.Length - $i)
-      $sp.Write($raster, $i, $len)
-      Start-Sleep -Milliseconds 15
-    }
-
-    if ($${isEscMode ? 'true' : 'false'}) {
-      [byte[]]$cmdFooter = @(0x1b, 0x4a, 32)
-    } else {
-      [byte[]]$cmdFooter = @(0x1f, 0xf0, 0x05, 0x00, 0x1f, 0xf0, 0x03, 0x00)
-    }
-    $sp.Write($cmdFooter, 0, $cmdFooter.Length)
-    $sp.BaseStream.Flush()
-
-    $waitLoops = 28
-    for ($w = 0; $w -lt $waitLoops; $w++) {
-      Start-Sleep -Milliseconds 200
-      $avail = $sp.BytesToRead
-      if ($avail -gt 0) {
-        $rx = New-Object byte[] $avail
-        $sp.Read($rx, 0, $avail) | Out-Null
-        $hex = [BitConverter]::ToString($rx)
-        Write-Output "RX=$hex"
-        if ($w -ge 12) { break }
-      }
-    }
-  }
-  Write-Output "PRINT_OK"
-} finally {
-  if ($sp.IsOpen) { $sp.Close() }
-}
-`;
-
-              execFile(
-                'powershell.exe',
-                ['-NoProfile', '-NonInteractive', '-Command', psScript],
-                { timeout: 45000 },
+              executeM250SerialPrint(
+                rasterBuffer,
+                Number(widthBytes),
+                Number(heightLines),
+                Number(copies),
+                protocolMode,
+                port,
                 (err, stdout, stderr) => {
-                  try {
-                    if (fs.existsSync(SAFE_JOB_FILE)) {
-                      fs.unlinkSync(SAFE_JOB_FILE);
-                    }
-                  } catch {
-                    // ignore cleanup error
-                  }
-
                   res.setHeader('Content-Type', 'application/json');
                   if (err) {
                     res.statusCode = 500;
@@ -240,24 +277,78 @@ try {
                         error:
                           stderr?.trim() ||
                           err.message ||
-                          'Не удалось отправить данные на Phomemo M250 (COM9). Проверьте, включён ли принтер.',
+                          'Не удалось отправить данные на Phomemo M250 (COM9).',
                       })
                     );
                     return;
                   }
-                  res.end(
-                    JSON.stringify({
-                      ok: true,
-                      port: cleanPort,
-                      output: stdout.trim(),
-                    })
-                  );
+                  res.end(JSON.stringify({ ok: true, output: stdout.trim() }));
                 }
               );
             } catch (e) {
               res.statusCode = 400;
               res.setHeader('Content-Type', 'application/json');
               res.end(JSON.stringify({ ok: false, error: String(e) }));
+            }
+          });
+          return;
+        }
+
+        // 4. Form POST to /api/print-m250-form (works from HTTPS dvrart.github.io in Yandex Browser / Safari!)
+        if (req.method === 'POST' && url === '/api/print-m250-form') {
+          let body = '';
+          req.on('data', (chunk) => {
+            body += chunk;
+          });
+          req.on('end', () => {
+            try {
+              const parsed = querystring.parse(body);
+              const rasterBase64 = String(parsed.rasterBase64 || '');
+              const widthBytes = Number(parsed.widthBytes || 72);
+              const heightLines = Number(parsed.heightLines || 240);
+              const copies = Number(parsed.copies || 1);
+              const protocolMode = String(parsed.protocolMode || 'm-series-esc');
+              const returnUrl = String(parsed.returnUrl || 'http://192.168.18.7:5173/');
+
+              const rasterBuffer = Buffer.from(rasterBase64, 'base64');
+              executeM250SerialPrint(
+                rasterBuffer,
+                widthBytes,
+                heightLines,
+                copies,
+                protocolMode,
+                'COM9',
+                (err) => {
+                  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+                  const statusTitle = err
+                    ? 'Ошибка связи с принтером COM9'
+                    : 'Напечатано на Phomemo M250!';
+                  res.end(`<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${statusTitle}</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; background: #0f172a; color: #fff; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; text-align: center; }
+    .card { background: #1e293b; padding: 28px; border-radius: 24px; max-width: 360px; width: 100%; }
+    .btn { display: inline-block; margin-top: 18px; padding: 12px 24px; background: #f59e0b; color: #0f172a; font-weight: 800; border-radius: 14px; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>${statusTitle}</h2>
+    <p>Возвращаемся в студию стикеров...</p>
+    <a class="btn" href="${returnUrl}">Вернуться назад</a>
+  </div>
+  <script>setTimeout(function(){ window.location.href = ${JSON.stringify(returnUrl)}; }, 1200);</script>
+</body>
+</html>`);
+                }
+              );
+            } catch (e) {
+              res.statusCode = 400;
+              res.end(String(e));
             }
           });
           return;

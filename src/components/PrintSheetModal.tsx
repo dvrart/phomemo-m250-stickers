@@ -9,15 +9,18 @@ import {
   Printer,
   Share2,
   Sparkles,
+  Wifi,
   X,
 } from 'lucide-react';
 import { DOTS_PER_MM } from '../data/labelSizes';
 import { FrameStyle, LabelSizePreset, StickerElement } from '../types/sticker';
 import {
+  encodeStickerStateForHandoff,
   M250ProtocolMode,
   prepareStickerAssets,
   printDirectBlePhomemoM250,
   printStickerNativeDialog,
+  submitPrintViaLocalForm,
   WebBluetoothNotSupportedError,
 } from '../utils/phomemoPrinter';
 
@@ -41,7 +44,7 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
   onAddToQueue,
 }) => {
   const [copies, setCopies] = useState(1);
-  const [protocolMode, setProtocolMode] = useState<M250ProtocolMode>('m250-72byte');
+  const [protocolMode, setProtocolMode] = useState<M250ProtocolMode>('m-series-esc');
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [showBrowserBleHelp, setShowBrowserBleHelp] = useState(false);
@@ -81,11 +84,18 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
   const dotsW = sizePreset.widthMm * DOTS_PER_MM;
   const dotsH = sizePreset.heightMm * DOTS_PER_MM;
   const isAndroid = /Android/i.test(navigator.userAgent);
-  const currentCleanUrl = window.location.href.replace(/^https?:\/\//, '');
-  const chromeIntentUrl = `intent://${currentCleanUrl}#Intent;scheme=https;package=com.android.chrome;end`;
-  const bluefyUrl = `bluefy://open?url=${encodeURIComponent(window.location.href)}`;
+  const encodedState = encodeStickerStateForHandoff(
+    sizePreset.id,
+    frame,
+    elements,
+    templateName
+  );
+  const baseUrlWithHash = `${window.location.origin}${window.location.pathname}#autoprint=${encodedState}`;
+  const cleanHostAndPath = baseUrlWithHash.replace(/^https?:\/\//, '');
+  const chromeIntentUrl = `intent://${cleanHostAndPath}#Intent;scheme=https;package=com.android.chrome;end`;
+  const bluefyUrl = `bluefy://open?url=${encodeURIComponent(baseUrlWithHash)}`;
 
-  // Synchronous native share handler (preserves transient user activation in iOS/Android browsers!)
+  // Synchronous native share handler
   const handleSharePrintMaster = async () => {
     setErrorMsg(null);
     setStatusMsg(null);
@@ -106,7 +116,7 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
           title: `${templateName} (${sizePreset.widthMm}×${sizePreset.heightMm} мм)`,
         });
         setStatusMsg(
-          'Меню телефона открыто! Выберите приложение «Print Master» для мгновенной печати или «Сохранить изображение».'
+          'Меню телефона открыто! Выберите «Print Master» для мгновенной печати или «Сохранить изображение».'
         );
         return;
       } catch (err) {
@@ -116,7 +126,6 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
       }
     }
 
-    // Fallback: trigger direct download + show long-press hint
     if (serverDownloadUrl) {
       const a = document.createElement('a');
       a.href = serverDownloadUrl;
@@ -126,7 +135,7 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
       document.body.removeChild(a);
     }
     setStatusMsg(
-      'Стикер сохранён! Вы также можете зажать пальцем белую картинку этикетки сверху (1 сек) → «Поделиться» → Print Master или «Сохранить в Фото».'
+      'Стикер сохранён! Зажмите пальцем белую картинку этикетки сверху (1 сек) → «Поделиться» → Print Master или «Сохранить в Фото».'
     );
   };
 
@@ -148,8 +157,16 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
       setStatusMsg(null);
       if (e instanceof WebBluetoothNotSupportedError) {
         setShowBrowserBleHelp(true);
+        // On Android inside Yandex Browser, automatically launch Chrome with the exact sticker ready to print!
+        if (isAndroid) {
+          setStatusMsg(
+            'Переключаем Bluetooth-печать (или выберите печать по домашнему Wi-Fi ниже)...'
+          );
+          window.location.href = chromeIntentUrl;
+          return;
+        }
         setErrorMsg(
-          'Яндекс Браузер и Safari блокируют прямой Bluetooth. Используйте жёлтую кнопку «Отправить в Print Master» ниже ИЛИ откройте сайт в браузере с поддержкой Bluetooth (Google Chrome на Android / Bluefy на iPhone):'
+          'Выберите удобный способ подключения Bluetooth к Phomemo M250 из этого браузера:'
         );
       } else {
         setErrorMsg(e instanceof Error ? e.message : 'Ошибка Bluetooth-печати');
@@ -182,7 +199,7 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
               <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
               <span className="text-xs font-bold uppercase tracking-wider text-amber-300">
                 Phomemo M250 • 203 DPI
-                {printerBattery !== null ? ` • Заряд ${printerBattery}%` : ' • Автономный режим'}
+                {printerBattery !== null ? ` • Заряд ${printerBattery}%` : ''}
               </span>
             </div>
             <h3 className="text-base font-bold mt-0.5">Печать этикетки</h3>
@@ -196,7 +213,7 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
         </div>
 
         <div className="p-4 overflow-y-auto space-y-3">
-          {/* Real PNG Image Preview (Supports Long-Press -> Save to Photos / Share to Print Master!) */}
+          {/* Real PNG Image Preview */}
           <div className="bg-slate-900 rounded-2xl p-3 pt-4 flex flex-col items-center relative overflow-hidden">
             <div className="w-4/5 h-2 bg-slate-950 rounded-full border border-slate-700 mb-1.5 shadow-inner" />
             <div className="animate-print-slide w-full max-w-[260px] flex flex-col items-center">
@@ -248,25 +265,43 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
             </div>
           </div>
 
-          {/* Status or Error Banner */}
+          {/* Status or Helper Banner */}
           {statusMsg && (
             <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex items-start gap-2.5 text-xs text-emerald-900">
               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
               <span>{statusMsg}</span>
             </div>
           )}
-          {errorMsg && (
-            <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 text-xs text-amber-950 space-y-2 leading-relaxed">
-              <div>{errorMsg}</div>
+
+          {(errorMsg || showBrowserBleHelp) && (
+            <div className="bg-slate-100 border border-slate-300 rounded-2xl p-3 text-xs text-slate-800 space-y-2 leading-relaxed">
+              {errorMsg && <div className="font-bold text-slate-900">{errorMsg}</div>}
               {showBrowserBleHelp && (
-                <div className="flex flex-col gap-1.5 pt-1">
+                <div className="flex flex-col gap-2">
+                  <button
+                    onClick={() =>
+                      submitPrintViaLocalForm(
+                        sizePreset,
+                        frame,
+                        elements,
+                        copies,
+                        protocolMode,
+                        '192.168.18.7:5173'
+                      )
+                    }
+                    className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs flex items-center justify-center gap-2 shadow-sm active:scale-95"
+                  >
+                    <Wifi className="w-4 h-4" />
+                    <span>Печать по домашнему Wi-Fi → M250 (из Яндекс Браузера)</span>
+                  </button>
+
                   {isAndroid ? (
                     <a
                       href={chromeIntentUrl}
                       className="w-full py-2.5 px-3 rounded-xl bg-blue-600 text-white font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-sm"
                     >
                       <ExternalLink className="w-4 h-4" />
-                      <span>Открыть эту страницу в Google Chrome (Bluetooth)</span>
+                      <span>Прямой Bluetooth без ПК (Открыть в Chrome)</span>
                     </a>
                   ) : (
                     <a
@@ -274,7 +309,7 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
                       className="w-full py-2.5 px-3 rounded-xl bg-blue-600 text-white font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-sm"
                     >
                       <ExternalLink className="w-4 h-4" />
-                      <span>Открыть в браузере Bluefy (Bluetooth на iPhone)</span>
+                      <span>Прямой Bluetooth без ПК (Открыть в Bluefy)</span>
                     </a>
                   )}
                 </div>
@@ -282,28 +317,38 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
             </div>
           )}
 
-          {/* Primary Action 1 (Works in ANY browser on iPhone & Android without PC!): Share to Print Master / Photos */}
+          {/* Main Action Buttons */}
           <div className="space-y-2">
-            <button
-              onClick={handleSharePrintMaster}
-              disabled={isBusy}
-              className="w-full py-3.5 px-4 rounded-2xl bg-amber-500 hover:bg-amber-600 active:scale-[0.99] text-slate-950 font-extrabold text-sm shadow-lg shadow-amber-500/25 flex items-center justify-center gap-2.5 transition"
-            >
-              <Share2 className="w-5 h-5 stroke-[2.3]" />
-              <span>Отправить в Print Master / Фото (Без ПК)</span>
-            </button>
-
             <button
               onClick={handleBlePrint}
               disabled={isBusy}
-              className="w-full py-3 px-4 rounded-2xl bg-emerald-500 hover:bg-emerald-600 active:scale-[0.99] text-slate-950 font-extrabold text-xs shadow-md shadow-emerald-500/20 flex items-center justify-center gap-2 transition"
+              className="w-full py-3.5 px-4 rounded-2xl bg-emerald-500 hover:bg-emerald-600 active:scale-[0.99] text-slate-950 font-extrabold text-sm shadow-lg shadow-emerald-500/25 flex items-center justify-center gap-2.5 transition"
             >
-              <Bluetooth className="w-4 h-4 stroke-[2.3]" />
-              <span>Прямая Bluetooth-печать (Chrome / Bluefy)</span>
+              <Bluetooth className="w-5 h-5 stroke-[2.3]" />
+              <span>Подключить Bluetooth-печать на M250</span>
+            </button>
+
+            <button
+              onClick={handleSharePrintMaster}
+              disabled={isBusy}
+              className="w-full py-3 px-4 rounded-2xl bg-amber-500 hover:bg-amber-600 active:scale-[0.99] text-slate-950 font-extrabold text-xs shadow-md shadow-amber-500/20 flex items-center justify-center gap-2 transition"
+            >
+              <Share2 className="w-4 h-4 stroke-[2.3]" />
+              <span>Отправить в Print Master / Фото (Без ПК)</span>
             </button>
 
             {/* Bluetooth Protocol Mode Selector for M250 */}
             <div className="flex items-center justify-between gap-1 bg-slate-100 p-1 rounded-xl text-[10px] font-bold">
+              <button
+                onClick={() => setProtocolMode('m-series-esc')}
+                className={`flex-1 py-1 rounded-lg transition ${
+                  protocolMode === 'm-series-esc'
+                    ? 'bg-slate-900 text-amber-300'
+                    : 'text-slate-600'
+                }`}
+              >
+                Режим 1: M250 Стандарт
+              </button>
               <button
                 onClick={() => setProtocolMode('m250-72byte')}
                 className={`flex-1 py-1 rounded-lg transition ${
@@ -312,7 +357,7 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
                     : 'text-slate-600'
                 }`}
               >
-                M250 (72 байта)
+                Режим 2: M220 (72б)
               </button>
               <button
                 onClick={() => setProtocolMode('m220-exact')}
@@ -322,17 +367,7 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
                     : 'text-slate-600'
                 }`}
               >
-                Узкий ({sizePreset.widthMm} байт)
-              </button>
-              <button
-                onClick={() => setProtocolMode('m-series-esc')}
-                className={`flex-1 py-1 rounded-lg transition ${
-                  protocolMode === 'm-series-esc'
-                    ? 'bg-slate-900 text-amber-300'
-                    : 'text-slate-600'
-                }`}
-              >
-                ESC/POS (M260)
+                Режим 3: Узкий ({sizePreset.widthMm}б)
               </button>
             </div>
 

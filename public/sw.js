@@ -1,4 +1,4 @@
-const CACHE_NAME = 'phomemo-m250-studio-v3';
+const CACHE_NAME = 'phomemo-m250-studio-v4';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();
@@ -26,6 +26,7 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+// Network-First strategy: always fetch fresh app when online, fall back to cache when offline!
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET' || req.url.includes('/api/')) {
@@ -33,18 +34,14 @@ self.addEventListener('fetch', (event) => {
   }
 
   event.respondWith(
-    caches.match(req).then((cached) => {
-      const networkFetch = fetch(req)
-        .then((response) => {
-          if (response && response.status === 200) {
-            const copy = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
-          }
-          return response;
-        })
-        .catch(() => cached);
-
-      return cached || networkFetch;
-    })
+    fetch(req)
+      .then((response) => {
+        if (response && response.status === 200) {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+        }
+        return response;
+      })
+      .catch(() => caches.match(req))
   );
 });

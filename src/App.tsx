@@ -49,6 +49,7 @@ import {
 } from './types/sticker';
 import {
   createCleanStickerCanvas,
+  decodeStickerStateFromHandoff,
 } from './utils/phomemoPrinter';
 import {
   ElementBoundingBox,
@@ -150,6 +151,22 @@ export function App() {
       // ignore
     }
   }, [printQueue]);
+
+  // Restore sticker from #autoprint=... handoff when opened in Chrome / Bluefy
+  useEffect(() => {
+    const handoff = decodeStickerStateFromHandoff(window.location.hash);
+    if (handoff) {
+      const foundSize =
+        LABEL_SIZE_PRESETS.find((s) => s.id === handoff.sizeId) || LABEL_SIZE_PRESETS[1];
+      setSizePreset(foundSize);
+      setFrame(handoff.frame);
+      setStickerName(handoff.templateName);
+      setElements(handoff.elements);
+      setActiveTab('editor');
+      setIsPrintModalOpen(true);
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+  }, []);
 
   // Re-render interactive editor canvas whenever sticker state changes
   useEffect(() => {

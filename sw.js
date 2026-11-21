@@ -1,4 +1,4 @@
-const CACHE_NAME = 'phomemo-m250-studio-v2';
+const CACHE_NAME = 'phomemo-m250-studio-v3';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();

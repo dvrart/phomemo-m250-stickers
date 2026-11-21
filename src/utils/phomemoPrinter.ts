@@ -4,7 +4,7 @@ import { renderStickerToCanvas } from './thermalCanvasRenderer';
 
 export const M250_HEAD_WIDTH_BYTES = 72;
 
-export type M250ProtocolMode = 'm220-exact' | 'm250-72byte' | 'm-series-esc';
+export type M250ProtocolMode = 'm250-72byte' | 'm220-exact' | 'm-series-esc';
 
 /**
  * Generates an offscreen canvas rendered cleanly (without editor selection guides)
@@ -37,27 +37,34 @@ export function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
 }
 
 /**
- * Works 100% autonomously on the iPhone even when the computer is turned off!
+ * Pre-builds both the PNG DataURL and a ready-to-share File object so navigator.share()
+ * can be invoked synchronously on button tap without losing transient user gesture activation.
  */
-export async function prepareServerStickerImage(
+export async function prepareStickerAssets(
   sizePreset: LabelSizePreset,
   frame: FrameStyle,
   elements: StickerElement[],
   templateName: string
-): Promise<{ imageUrl: string; downloadUrl: string }> {
+): Promise<{
+  imageUrl: string;
+  downloadUrl: string;
+  shareFile: File;
+  fileName: string;
+}> {
   const canvas = createCleanStickerCanvas(sizePreset, frame, elements, 3);
   const dataUrl = canvas.toDataURL('image/png');
+  const blob = await canvasToBlob(canvas);
   const safeName =
     templateName
       .replace(/[^a-zA-Zа-яА-ЯёЁ0-9_-]+/g, '_')
       .replace(/^_+|_+$/g, '') || 'stiker';
   const fileName = `Phomemo_M250_${sizePreset.widthMm}x${sizePreset.heightMm}mm_${safeName}.png`;
+  const shareFile = new File([blob], fileName, { type: 'image/png' });
 
-  // Only call local server if we are on local network HTTP
   if (location.hostname === 'localhost' || location.hostname.startsWith('192.168.')) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 1000);
+      const timer = setTimeout(() => controller.abort(), 900);
       const resp = await fetch('/api/prepare-sticker', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -68,75 +75,25 @@ export async function prepareServerStickerImage(
       if (resp.ok) {
         const json = await resp.json();
         if (json.ok && json.imageUrl) {
-          return { imageUrl: json.imageUrl, downloadUrl: json.downloadUrl };
+          return {
+            imageUrl: json.imageUrl,
+            downloadUrl: json.downloadUrl,
+            shareFile,
+            fileName,
+          };
         }
       }
     } catch {
       // Autonomous mode
     }
   }
-  return { imageUrl: dataUrl, downloadUrl: dataUrl };
-}
 
-export async function shareOrDownloadSticker(
-  sizePreset: LabelSizePreset,
-  frame: FrameStyle,
-  elements: StickerElement[],
-  templateName: string
-): Promise<{ mode: 'shared' | 'server-image'; imageUrl?: string; downloadUrl?: string }> {
-  const canvas = createCleanStickerCanvas(sizePreset, frame, elements, 3);
-  const blob = await canvasToBlob(canvas);
-  const safeName =
-    templateName
-      .replace(/[^a-zA-Zа-яА-ЯёЁ0-9_-]+/g, '_')
-      .replace(/^_+|_+$/g, '') || 'stiker';
-  const fileName = `Phomemo_M250_${sizePreset.widthMm}x${sizePreset.heightMm}mm_${safeName}.png`;
-  const file = new File([blob], fileName, { type: 'image/png' });
-
-  const nav = navigator as Navigator & {
-    canShare?: (data?: ShareData) => boolean;
-  };
-
-  if (
-    window.isSecureContext &&
-    typeof nav.share === 'function' &&
-    (!nav.canShare || nav.canShare({ files: [file] }))
-  ) {
-    try {
-      await nav.share({
-        files: [file],
-        title: `${templateName} (${sizePreset.widthMm}×${sizePreset.heightMm} мм)`,
-      });
-      return { mode: 'shared' };
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        return { mode: 'shared' };
-      }
-    }
-  }
-
-  const prepared = await prepareServerStickerImage(sizePreset, frame, elements, templateName);
   return {
-    mode: 'server-image',
-    imageUrl: prepared.imageUrl,
-    downloadUrl: prepared.downloadUrl,
+    imageUrl: dataUrl,
+    downloadUrl: dataUrl,
+    shareFile,
+    fileName,
   };
-}
-
-export async function downloadStickerPng(
-  sizePreset: LabelSizePreset,
-  frame: FrameStyle,
-  elements: StickerElement[],
-  templateName: string
-): Promise<{ imageUrl: string; downloadUrl: string }> {
-  const prepared = await prepareServerStickerImage(sizePreset, frame, elements, templateName);
-  const a = document.createElement('a');
-  a.href = prepared.downloadUrl;
-  a.download = `Phomemo_M250_${sizePreset.widthMm}x${sizePreset.heightMm}mm.png`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  return prepared;
 }
 
 export function printStickerNativeDialog(
@@ -204,14 +161,12 @@ export function printStickerNativeDialog(
 
 /**
  * Builds the 1-bit monochrome raster for Phomemo M250.
- * - If padTo72Bytes is false ('m220-exact'), widthBytes = exact label width in bytes (e.g. 50 for 50mm), matching phomemo-tools rastertopm110.py!
- * - If padTo72Bytes is true ('m250-72byte' / 'm-series-esc'), widthBytes = 72 bytes (576 dots) with label centered.
  */
 export function buildPhomemoM250Raster(
   sizePreset: LabelSizePreset,
   frame: FrameStyle,
   elements: StickerElement[],
-  padTo72Bytes = false
+  padTo72Bytes = true
 ): { raster: Uint8Array; widthBytes: number; heightLines: number } {
   const canvas = createCleanStickerCanvas(sizePreset, frame, elements, 1);
   const width = canvas.width;
@@ -264,6 +219,13 @@ function uint8ToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+export class WebBluetoothNotSupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WebBluetoothNotSupportedError';
+  }
+}
+
 /**
  * Autonomous & Bridge Bluetooth printing for Phomemo M250
  */
@@ -273,7 +235,7 @@ export async function printDirectBlePhomemoM250(
   elements: StickerElement[],
   copies = 1,
   onStatus?: (msg: string) => void,
-  protocolMode: M250ProtocolMode = 'm220-exact'
+  protocolMode: M250ProtocolMode = 'm250-72byte'
 ): Promise<void> {
   const padTo72 = protocolMode !== 'm220-exact';
   const { raster, widthBytes, heightLines } = buildPhomemoM250Raster(
@@ -289,133 +251,180 @@ export async function printDirectBlePhomemoM250(
         name?: string;
         gatt?: {
           connect: () => Promise<{
-            getPrimaryServices: () => Promise<
-              Array<{
+            getPrimaryService: (uuid: number | string) => Promise<{
+              getCharacteristic: (uuid: number | string) => Promise<{
                 uuid: string;
-                getCharacteristics: () => Promise<
-                  Array<{
-                    uuid: string;
-                    properties: { write?: boolean; writeWithoutResponse?: boolean };
-                    writeValueWithResponse?: (val: BufferSource) => Promise<void>;
-                    writeValueWithoutResponse?: (val: BufferSource) => Promise<void>;
-                    writeValue?: (val: BufferSource) => Promise<void>;
-                  }>
-                >;
-              }>
-            >;
+                properties: { write?: boolean; writeWithoutResponse?: boolean };
+                writeValueWithResponse?: (val: BufferSource) => Promise<void>;
+                writeValueWithoutResponse?: (val: BufferSource) => Promise<void>;
+                writeValue?: (val: BufferSource) => Promise<void>;
+                startNotifications?: () => Promise<void>;
+              }>;
+            }>;
           }>;
         };
       }>;
     };
   };
 
-  // 1. Direct Autonomous Web Bluetooth (works in Bluefy on iPhone 24/7 without any computer!)
+  // 1. Try Direct Autonomous Web Bluetooth (works in Chrome on Android/Mac/PC and Bluefy on iPhone)
   if (nav.bluetooth) {
-    onStatus?.('Поиск принтера Phomemo M250 по Bluetooth напрямую с телефона...');
-    const device = await nav.bluetooth.requestDevice({
-      filters: [
-        { namePrefix: 'M250' },
-        { namePrefix: 'Phomemo' },
-        { namePrefix: 'Q' },
-        { services: [0xff00] },
-      ],
-      optionalServices: [
-        0xff00,
-        '0000ff00-0000-1000-8000-00805f9b34fb',
-        '49535343-fe7d-4ae5-8fa9-9fafd205e455',
-      ],
-    });
+    let device: Awaited<ReturnType<NonNullable<typeof nav.bluetooth>['requestDevice']>> | null =
+      null;
+    const optionalServices = [
+      0xff00,
+      0xffe0,
+      0xae30,
+      '0000ff00-0000-1000-8000-00805f9b34fb',
+      '49535343-fe7d-4ae5-8fa9-9fafd205e455',
+    ];
 
-    if (!device.gatt) {
-      throw new Error('Не удалось подключиться к Bluetooth принтера Phomemo M250');
+    try {
+      onStatus?.('Поиск принтера Phomemo M250 по Bluetooth...');
+      try {
+        device = await nav.bluetooth.requestDevice({
+          filters: [
+            { namePrefix: 'M' },
+            { namePrefix: 'Q' },
+            { namePrefix: 'Phomemo' },
+          ],
+          optionalServices,
+        });
+      } catch (filterErr) {
+        const msg = filterErr instanceof Error ? filterErr.message : String(filterErr);
+        // If user cancelled the picker, stop immediately
+        if (msg.includes('cancelled') || msg.includes('canceled') || msg.includes('User')) {
+          throw new Error('Выбор Bluetooth-устройства отменён');
+        }
+        // If platform/browser blocks Web Bluetooth (like Yandex Browser or Safari)
+        if (
+          msg.includes('not supported') ||
+          msg.includes('NotSupported') ||
+          msg.includes('globally disabled')
+        ) {
+          throw new WebBluetoothNotSupportedError(msg);
+        }
+        device = await nav.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices,
+        });
+      }
+    } catch (bleErr) {
+      if (bleErr instanceof WebBluetoothNotSupportedError) {
+        // Fall through to check local bridge or throw friendly browser hint
+      } else {
+        throw bleErr;
+      }
     }
 
-    onStatus?.(`Подключение к ${device.name || 'Phomemo M250'}...`);
-    const server = await device.gatt.connect();
-    const services = await server.getPrimaryServices();
-    let writeChar: {
-      writeValueWithResponse?: (val: BufferSource) => Promise<void>;
-      writeValueWithoutResponse?: (val: BufferSource) => Promise<void>;
-      writeValue?: (val: BufferSource) => Promise<void>;
-    } | null = null;
+    if (device && device.gatt) {
+      onStatus?.(`Подключение к ${device.name || 'Phomemo M250'}...`);
+      const server = await device.gatt.connect();
+      await new Promise((r) => setTimeout(r, 100));
 
-    for (const svc of services) {
-      const chars = await svc.getCharacteristics();
-      for (const ch of chars) {
-        if (ch.properties.write || ch.properties.writeWithoutResponse) {
-          writeChar = ch;
-          if (ch.uuid.includes('ff02')) break;
+      let service = null;
+      for (const uuid of optionalServices) {
+        try {
+          service = await server.getPrimaryService(uuid);
+          break;
+        } catch {
+          // try next service
         }
       }
-      if (writeChar) break;
+
+      if (!service) {
+        throw new Error('Не найден Bluetooth-сервис принтера Phomemo M250 (0xFF00)');
+      }
+
+      const writeChar = await service.getCharacteristic(0xff02);
+      const useWriteWithResponse =
+        !writeChar.properties.writeWithoutResponse && !!writeChar.properties.write;
+
+      try {
+        const notifyChar = await service.getCharacteristic(0xff03);
+        if (notifyChar.startNotifications) {
+          await notifyChar.startNotifications();
+        }
+      } catch {
+        // notifications optional
+      }
+
+      const sendBytes = async (data: Uint8Array) => {
+        // CRITICAL: Always allocate a standalone ArrayBuffer of exact chunk length
+        const cleanBuffer = new Uint8Array(data).buffer;
+        if (useWriteWithResponse && writeChar.writeValue) {
+          await writeChar.writeValue(cleanBuffer);
+        } else if (writeChar.writeValueWithoutResponse) {
+          try {
+            await writeChar.writeValueWithoutResponse(cleanBuffer);
+          } catch {
+            if (writeChar.writeValue) {
+              await writeChar.writeValue(cleanBuffer);
+            }
+          }
+        } else if (writeChar.writeValue) {
+          await writeChar.writeValue(cleanBuffer);
+        }
+      };
+
+      const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+      for (let c = 0; c < copies; c++) {
+        onStatus?.(`Печать этикетки ${c + 1} из ${copies} по Bluetooth...`);
+
+        if (protocolMode === 'm-series-esc') {
+          // Phomymo M250/M260 m-series BLE sequence
+          await sendBytes(new Uint8Array([0x1b, 0x40]));
+          await delay(100);
+          await sendBytes(new Uint8Array([0x1b, 0x37, 7, 140, 2]));
+          await delay(30);
+          await sendBytes(new Uint8Array([0x1d, 0x7c, 6]));
+          await delay(50);
+        } else {
+          // Phomemo M110/M220/M250 die-cut gap sequence
+          await sendBytes(new Uint8Array([0x1b, 0x4e, 0x0d, 0x05]));
+          await delay(30);
+          await sendBytes(new Uint8Array([0x1b, 0x4e, 0x04, 0x0c]));
+          await delay(30);
+          await sendBytes(new Uint8Array([0x1f, 0x11, 0x0a]));
+          await delay(30);
+        }
+
+        await sendBytes(
+          new Uint8Array([
+            0x1d,
+            0x76,
+            0x30,
+            0x00,
+            widthBytes & 0xff,
+            0x00,
+            heightLines & 0xff,
+            (heightLines >> 8) & 0xff,
+          ])
+        );
+
+        const chunkSize = 128;
+        for (let offset = 0; offset < raster.length; offset += chunkSize) {
+          const slice = raster.slice(offset, Math.min(offset + chunkSize, raster.length));
+          await sendBytes(slice);
+          await delay(20);
+        }
+
+        await delay(300);
+        if (protocolMode === 'm-series-esc') {
+          await sendBytes(new Uint8Array([0x1b, 0x4a, 32]));
+        } else {
+          await sendBytes(new Uint8Array([0x1f, 0xf0, 0x05, 0x00, 0x1f, 0xf0, 0x03, 0x00]));
+        }
+        await delay(800);
+      }
+
+      onStatus?.('Готово! Этикетка напечатана напрямую с телефона на Phomemo M250!');
+      return;
     }
-
-    if (!writeChar) {
-      throw new Error('Не найдена характеристика записи Bluetooth принтера');
-    }
-
-    const sendBytes = async (chunk: Uint8Array) => {
-      if (writeChar!.writeValueWithoutResponse) {
-        await writeChar!.writeValueWithoutResponse(chunk as unknown as BufferSource);
-      } else if (writeChar!.writeValueWithResponse) {
-        await writeChar!.writeValueWithResponse(chunk as unknown as BufferSource);
-      } else if (writeChar!.writeValue) {
-        await writeChar!.writeValue(chunk as unknown as BufferSource);
-      }
-    };
-
-    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-    for (let c = 0; c < copies; c++) {
-      onStatus?.(`Печать этикетки ${c + 1} из ${copies} напрямую по Bluetooth...`);
-      if (protocolMode === 'm-series-esc') {
-        await sendBytes(new Uint8Array([0x1b, 0x40]));
-        await delay(100);
-        await sendBytes(new Uint8Array([0x1b, 0x37, 7, 140, 2]));
-        await delay(30);
-        await sendBytes(new Uint8Array([0x1d, 0x7c, 6]));
-        await delay(50);
-      } else {
-        await sendBytes(new Uint8Array([0x1b, 0x4e, 0x0d, 0x05]));
-        await delay(30);
-        await sendBytes(new Uint8Array([0x1b, 0x4e, 0x04, 0x0c]));
-        await delay(30);
-        await sendBytes(new Uint8Array([0x1f, 0x11, 0x0a]));
-        await delay(30);
-      }
-
-      await sendBytes(
-        new Uint8Array([
-          0x1d,
-          0x76,
-          0x30,
-          0x00,
-          widthBytes & 0xff,
-          0x00,
-          heightLines & 0xff,
-          (heightLines >> 8) & 0xff,
-        ])
-      );
-      const chunkSize = 128;
-      for (let offset = 0; offset < raster.length; offset += chunkSize) {
-        const slice = raster.subarray(offset, Math.min(offset + chunkSize, raster.length));
-        await sendBytes(slice);
-        await delay(20);
-      }
-      await delay(300);
-      if (protocolMode === 'm-series-esc') {
-        await sendBytes(new Uint8Array([0x1b, 0x4a, 32]));
-      } else {
-        await sendBytes(new Uint8Array([0x1f, 0xf0, 0x05, 0x00, 0x1f, 0xf0, 0x03, 0x00]));
-      }
-      await delay(800);
-    }
-
-    onStatus?.('Готово! Этикетка напечатана напрямую с телефона на Phomemo M250!');
-    return;
   }
 
-  // 2. Try local PC Bluetooth bridge if reachable
+  // 2. Try local PC Bluetooth bridge if on local network
   if (location.hostname === 'localhost' || location.hostname.startsWith('192.168.')) {
     onStatus?.('Отправка этикетки на Phomemo M250...');
     const rasterBase64 = uint8ToBase64(raster);
@@ -440,11 +449,11 @@ export async function printDirectBlePhomemoM250(
         return;
       }
     } catch {
-      // Computer is off
+      // PC is off
     }
   }
 
-  throw new Error(
-    'Для печати с iPhone без компьютера: нажмите жёлтую кнопку «Отправить в Print Master / Фото» (откроется системное меню iPhone → выберите Print Master) ИЛИ откройте этот сайт в бесплатном приложении Bluefy из App Store для прямой Bluetooth-печати!'
+  throw new WebBluetoothNotSupportedError(
+    'Яндекс Браузер и Safari блокируют прямой доступ сайтов к Bluetooth.'
   );
 }

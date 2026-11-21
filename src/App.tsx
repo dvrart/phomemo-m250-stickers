@@ -49,9 +49,6 @@ import {
 } from './types/sticker';
 import {
   createCleanStickerCanvas,
-  downloadStickerPng,
-  printStickerNativeDialog,
-  shareOrDownloadSticker,
 } from './utils/phomemoPrinter';
 import {
   ElementBoundingBox,

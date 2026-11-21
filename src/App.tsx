@@ -152,9 +152,11 @@ export function App() {
     }
   }, [printQueue]);
 
-  // Restore sticker from #autoprint=... handoff when opened in Chrome / Bluefy
+  // Restore sticker from ?autoprint=... or #autoprint=... handoff when opened in Chrome / Bluefy
   useEffect(() => {
-    const handoff = decodeStickerStateFromHandoff(window.location.hash);
+    const handoff = decodeStickerStateFromHandoff(
+      window.location.search || window.location.hash
+    );
     if (handoff) {
       const foundSize =
         LABEL_SIZE_PRESETS.find((s) => s.id === handoff.sizeId) || LABEL_SIZE_PRESETS[1];

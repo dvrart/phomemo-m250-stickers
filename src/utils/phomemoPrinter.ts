@@ -4,6 +4,8 @@ import { renderStickerToCanvas } from './thermalCanvasRenderer';
 
 export const M250_HEAD_WIDTH_BYTES = 72;
 
+export const HTTPS_BRIDGE_URL = 'https://4c03246761eef4.app.lhr.life';
+
 export type M250ProtocolMode = 'm-series-esc' | 'm250-72byte' | 'm220-exact';
 
 /**
@@ -56,33 +58,6 @@ export async function prepareStickerAssets(
       .replace(/^_+|_+$/g, '') || 'stiker';
   const fileName = `Phomemo_M250_${sizePreset.widthMm}x${sizePreset.heightMm}mm_${safeName}.png`;
   const shareFile = new File([blob], fileName, { type: 'image/png' });
-
-  if (location.hostname === 'localhost' || location.hostname.startsWith('192.168.')) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 900);
-      const resp = await fetch('/api/prepare-sticker', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dataUrl, fileName }),
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-      if (resp.ok) {
-        const json = await resp.json();
-        if (json.ok && json.imageUrl) {
-          return {
-            imageUrl: json.imageUrl,
-            downloadUrl: json.downloadUrl,
-            shareFile,
-            fileName,
-          };
-        }
-      }
-    } catch {
-      // Autonomous mode
-    }
-  }
 
   return {
     imageUrl: dataUrl,
@@ -222,63 +197,6 @@ export class WebBluetoothNotSupportedError extends Error {
   }
 }
 
-/**
- * Submits print job via top-level form POST to local PC Bluetooth bridge (http://192.168.18.7:5173/api/print-m250-form)
- * Works even from HTTPS (dvrart.github.io) inside Yandex Browser or Safari when on home Wi-Fi!
- */
-export function submitPrintViaLocalForm(
-  sizePreset: LabelSizePreset,
-  frame: FrameStyle,
-  elements: StickerElement[],
-  copies = 1,
-  protocolMode: M250ProtocolMode = 'm-series-esc',
-  hostIp = '192.168.18.7:5173'
-): void {
-  const padTo72 = protocolMode !== 'm220-exact';
-  const { raster, widthBytes, heightLines } = buildPhomemoM250Raster(
-    sizePreset,
-    frame,
-    elements,
-    padTo72
-  );
-  const rasterBase64 = uint8ToBase64(raster);
-
-  const form = document.createElement('form');
-  form.method = 'POST';
-  form.action = `http://${hostIp}/api/print-m250-form`;
-  form.style.display = 'none';
-
-  const fields: Record<string, string> = {
-    rasterBase64,
-    widthBytes: String(widthBytes),
-    heightLines: String(heightLines),
-    copies: String(copies),
-    protocolMode,
-    returnUrl: window.location.href,
-  };
-
-  for (const [k, v] of Object.entries(fields)) {
-    const input = document.createElement('input');
-    input.type = 'hidden';
-    input.name = k;
-    input.value = v;
-    form.appendChild(input);
-  }
-
-  document.body.appendChild(form);
-  form.submit();
-  setTimeout(() => {
-    try {
-      document.body.removeChild(form);
-    } catch {
-      // ignore
-    }
-  }, 2000);
-}
-
-/**
- * Encodes current sticker state into a compact URL hash so opening in Chrome/Bluefy restores the exact sticker
- */
 export function encodeStickerStateForHandoff(
   sizeId: string,
   frame: FrameStyle,
@@ -298,14 +216,14 @@ export function encodeStickerStateForHandoff(
   }
 }
 
-export function decodeStickerStateFromHandoff(hashStr: string): {
+export function decodeStickerStateFromHandoff(searchOrHash: string): {
   sizeId: string;
   frame: FrameStyle;
   templateName: string;
   elements: StickerElement[];
 } | null {
   try {
-    const m = hashStr.match(/autoprint=([^&]+)/);
+    const m = searchOrHash.match(/autoprint=([^&#]+)/);
     if (!m) return null;
     const jsonStr = decodeURIComponent(escape(atob(decodeURIComponent(m[1]))));
     const parsed = JSON.parse(jsonStr);
@@ -323,8 +241,40 @@ export function decodeStickerStateFromHandoff(hashStr: string): {
   return null;
 }
 
+export async function checkPrinterBridgeStatus(): Promise<{
+  connected: boolean;
+  battery: number | null;
+}> {
+  const endpoints = [
+    ...(location.hostname === 'localhost' || location.hostname.startsWith('192.168.')
+      ? ['/api/printer-status']
+      : []),
+    `${HTTPS_BRIDGE_URL}/api/printer-status`,
+  ];
+
+  for (const ep of endpoints) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2500);
+      const r = await fetch(ep, { signal: controller.signal });
+      clearTimeout(timer);
+      if (r.ok) {
+        const d = await r.json();
+        if (d?.connected) {
+          return { connected: true, battery: typeof d.battery === 'number' ? d.battery : 100 };
+        }
+      }
+    } catch {
+      // try next
+    }
+  }
+  return { connected: false, battery: null };
+}
+
 /**
- * Autonomous & Bridge Bluetooth printing for Phomemo M250
+ * Universal Bluetooth printing for Phomemo M250 from ANY browser (Yandex Browser, Safari, Chrome, Bluefy):
+ * 1) First tries the active HTTPS / local Bluetooth bridge to COM9 (works in Yandex Browser & Safari without any popups!).
+ * 2) If bridge is offline (PC is off), uses direct Web Bluetooth from the phone!
  */
 export async function printDirectBlePhomemoM250(
   sizePreset: LabelSizePreset,
@@ -341,36 +291,45 @@ export async function printDirectBlePhomemoM250(
     elements,
     padTo72
   );
+  const rasterBase64 = uint8ToBase64(raster);
 
-  // 1. If we are on local network HTTP (192.168.x.x or localhost), print directly via server COM9 bridge first!
-  if (location.hostname === 'localhost' || location.hostname.startsWith('192.168.')) {
-    onStatus?.('Отправка этикетки на Phomemo M250 по Bluetooth...');
-    const rasterBase64 = uint8ToBase64(raster);
-    const resp = await fetch('/api/print-m250', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        rasterBase64,
-        widthBytes,
-        heightLines,
-        copies,
-        protocolMode,
-        port: 'COM9',
-      }),
-    });
-    const data = await resp.json();
-    if (resp.ok && data.ok) {
-      onStatus?.(
-        `Напечатано! Стикер (${sizePreset.widthMm}×${sizePreset.heightMm} мм, ${copies} шт.) отправлен на Phomemo M250.`
-      );
-      return;
-    }
-    if (data?.error) {
-      throw new Error(data.error);
+  // 1. Try active Bluetooth Bridge (local or HTTPS tunnel) first so Yandex Browser & Safari print immediately!
+  const bridgeEndpoints = [
+    ...(location.hostname === 'localhost' || location.hostname.startsWith('192.168.')
+      ? ['/api/print-m250']
+      : []),
+    `${HTTPS_BRIDGE_URL}/api/print-m250`,
+  ];
+
+  for (const endpoint of bridgeEndpoints) {
+    try {
+      onStatus?.('Передача этикетки по Bluetooth на Phomemo M250...');
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rasterBase64,
+          widthBytes,
+          heightLines,
+          copies,
+          protocolMode,
+          port: 'COM9',
+        }),
+      });
+      const data = await resp.json();
+      if (resp.ok && data.ok) {
+        onStatus?.(
+          `Напечатано! Стикер (${sizePreset.widthMm}×${sizePreset.heightMm} мм, ${copies} шт.) отправлен на Phomemo M250.`
+        );
+        return;
+      }
+    } catch {
+      // Bridge not reachable, continue to direct Web Bluetooth
     }
   }
 
-  // 2. Try Direct Autonomous Web Bluetooth (works in Chrome on Android/Mac/PC and Bluefy on iPhone)
+  // 2. Direct Autonomous Web Bluetooth (when PC is off)
+  const isYaBrowser = /YaBrowser|Yowser/i.test(navigator.userAgent);
   const nav = navigator as Navigator & {
     bluetooth?: {
       requestDevice: (options: unknown) => Promise<{
@@ -393,7 +352,7 @@ export async function printDirectBlePhomemoM250(
     };
   };
 
-  if (nav.bluetooth) {
+  if (nav.bluetooth && !isYaBrowser) {
     let device: Awaited<ReturnType<NonNullable<typeof nav.bluetooth>['requestDevice']>> | null =
       null;
     const optionalServices = [
@@ -498,7 +457,6 @@ export async function printDirectBlePhomemoM250(
         onStatus?.(`Печать этикетки ${c + 1} из ${copies} по Bluetooth...`);
 
         if (protocolMode === 'm-series-esc') {
-          // Verified Phomemo M250 m-series sequence (ESC @, ESC 7, GS |, GS v 0, ESC J)
           await sendBytes(new Uint8Array([0x1b, 0x40]));
           await delay(100);
           await sendBytes(new Uint8Array([0x1b, 0x37, 7, 140, 2]));

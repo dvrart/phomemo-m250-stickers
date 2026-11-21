@@ -9,18 +9,17 @@ import {
   Printer,
   Share2,
   Sparkles,
-  Wifi,
   X,
 } from 'lucide-react';
 import { DOTS_PER_MM } from '../data/labelSizes';
 import { FrameStyle, LabelSizePreset, StickerElement } from '../types/sticker';
 import {
+  checkPrinterBridgeStatus,
   encodeStickerStateForHandoff,
   M250ProtocolMode,
   prepareStickerAssets,
   printDirectBlePhomemoM250,
   printStickerNativeDialog,
-  submitPrintViaLocalForm,
   WebBluetoothNotSupportedError,
 } from '../utils/phomemoPrinter';
 
@@ -67,16 +66,11 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
       setReadyShareFile(res.shareFile);
       setReadyFileName(res.fileName);
     });
-    if (location.hostname === 'localhost' || location.hostname.startsWith('192.168.')) {
-      fetch('/api/printer-status')
-        .then((r) => r.json())
-        .then((d) => {
-          if (d?.connected && typeof d.battery === 'number') {
-            setPrinterBattery(d.battery);
-          }
-        })
-        .catch(() => {});
-    }
+    checkPrinterBridgeStatus().then((st) => {
+      if (st.connected) {
+        setPrinterBattery(st.battery);
+      }
+    });
   }, [isOpen, sizePreset, frame, elements, templateName]);
 
   if (!isOpen) return null;
@@ -90,12 +84,12 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
     elements,
     templateName
   );
-  const baseUrlWithHash = `${window.location.origin}${window.location.pathname}#autoprint=${encodedState}`;
-  const cleanHostAndPath = baseUrlWithHash.replace(/^https?:\/\//, '');
+  // Use ?autoprint= query param so there is only ONE # (#Intent;...;end) in the Android intent URI!
+  const baseUrlWithQuery = `${window.location.origin}${window.location.pathname}?autoprint=${encodedState}`;
+  const cleanHostAndPath = baseUrlWithQuery.replace(/^https?:\/\//, '');
   const chromeIntentUrl = `intent://${cleanHostAndPath}#Intent;scheme=https;package=com.android.chrome;end`;
-  const bluefyUrl = `bluefy://open?url=${encodeURIComponent(baseUrlWithHash)}`;
+  const bluefyUrl = `bluefy://open?url=${encodeURIComponent(baseUrlWithQuery)}`;
 
-  // Synchronous native share handler
   const handleSharePrintMaster = async () => {
     setErrorMsg(null);
     setStatusMsg(null);
@@ -143,7 +137,7 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
     setIsBusy(true);
     setErrorMsg(null);
     setShowBrowserBleHelp(false);
-    setStatusMsg('Подключение к Phomemo M250 по Bluetooth...');
+    setStatusMsg('Отправка на Phomemo M250 по Bluetooth...');
     try {
       await printDirectBlePhomemoM250(
         sizePreset,
@@ -157,16 +151,8 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
       setStatusMsg(null);
       if (e instanceof WebBluetoothNotSupportedError) {
         setShowBrowserBleHelp(true);
-        // On Android inside Yandex Browser, automatically launch Chrome with the exact sticker ready to print!
-        if (isAndroid) {
-          setStatusMsg(
-            'Переключаем Bluetooth-печать (или выберите печать по домашнему Wi-Fi ниже)...'
-          );
-          window.location.href = chromeIntentUrl;
-          return;
-        }
         setErrorMsg(
-          'Выберите удобный способ подключения Bluetooth к Phomemo M250 из этого браузера:'
+          'Компьютер сейчас выключен, а Яндекс Браузер / Safari ограничивают прямой Bluetooth. Нажмите кнопку ниже:'
         );
       } else {
         setErrorMsg(e instanceof Error ? e.message : 'Ошибка Bluetooth-печати');
@@ -199,7 +185,7 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
               <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
               <span className="text-xs font-bold uppercase tracking-wider text-amber-300">
                 Phomemo M250 • 203 DPI
-                {printerBattery !== null ? ` • Заряд ${printerBattery}%` : ''}
+                {printerBattery !== null ? ` • Подключён (${printerBattery}%)` : ''}
               </span>
             </div>
             <h3 className="text-base font-bold mt-0.5">Печать этикетки</h3>
@@ -278,30 +264,13 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
               {errorMsg && <div className="font-bold text-slate-900">{errorMsg}</div>}
               {showBrowserBleHelp && (
                 <div className="flex flex-col gap-2">
-                  <button
-                    onClick={() =>
-                      submitPrintViaLocalForm(
-                        sizePreset,
-                        frame,
-                        elements,
-                        copies,
-                        protocolMode,
-                        '192.168.18.7:5173'
-                      )
-                    }
-                    className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs flex items-center justify-center gap-2 shadow-sm active:scale-95"
-                  >
-                    <Wifi className="w-4 h-4" />
-                    <span>Печать по домашнему Wi-Fi → M250 (из Яндекс Браузера)</span>
-                  </button>
-
                   {isAndroid ? (
                     <a
                       href={chromeIntentUrl}
                       className="w-full py-2.5 px-3 rounded-xl bg-blue-600 text-white font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-sm"
                     >
                       <ExternalLink className="w-4 h-4" />
-                      <span>Прямой Bluetooth без ПК (Открыть в Chrome)</span>
+                      <span>Открыть Bluetooth в Google Chrome</span>
                     </a>
                   ) : (
                     <a
@@ -309,7 +278,7 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
                       className="w-full py-2.5 px-3 rounded-xl bg-blue-600 text-white font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-sm"
                     >
                       <ExternalLink className="w-4 h-4" />
-                      <span>Прямой Bluetooth без ПК (Открыть в Bluefy)</span>
+                      <span>Открыть Bluetooth в Bluefy (iPhone)</span>
                     </a>
                   )}
                 </div>

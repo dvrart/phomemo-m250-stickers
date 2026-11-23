@@ -1,4 +1,4 @@
-const CACHE_NAME = 'phomemo-m250-studio-v5';
+const CACHE_NAME = 'phomemo-m250-studio-v6';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();
@@ -26,10 +26,15 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Network-First strategy: always fetch fresh app when online, fall back to cache when offline!
 self.addEventListener('fetch', (event) => {
   const req = event.request;
-  if (req.method !== 'GET' || req.url.includes('/api/') || req.url.includes('lhr.life')) {
+  if (
+    req.method !== 'GET' ||
+    req.url.includes('/api/') ||
+    req.url.includes('trycloudflare.com') ||
+    req.url.includes('api.github.com') ||
+    req.url.includes('bridge.json')
+  ) {
     return;
   }
 

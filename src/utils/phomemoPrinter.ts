@@ -4,13 +4,58 @@ import { renderStickerToCanvas } from './thermalCanvasRenderer';
 
 export const M250_HEAD_WIDTH_BYTES = 72;
 
-export const HTTPS_BRIDGE_URL = 'https://4c03246761eef4.app.lhr.life';
+export const FALLBACK_BRIDGE_URL = 'https://edt-resistance-scenarios-placing.trycloudflare.com';
 
 export type M250ProtocolMode = 'm-series-esc' | 'm250-72byte' | 'm220-exact';
 
+let cachedDynamicBridgeUrl: string | null = null;
+
 /**
- * Generates an offscreen canvas rendered cleanly (without editor selection guides)
+ * Dynamically fetches the current active Cloudflare HTTPS Tunnel URL published by the PC into GitHub (zero CDN cache via api.github.com)
  */
+export async function resolveLiveBridgeUrls(): Promise<string[]> {
+  const urls: string[] = [];
+
+  if (location.hostname === 'localhost' || location.hostname.startsWith('192.168.')) {
+    urls.push('');
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    const resp = await fetch(
+      `https://api.github.com/repos/dvrart/phomemo-m250-stickers/contents/bridge.json?ref=gh-pages&t=${Date.now()}`,
+      {
+        headers: { Accept: 'application/vnd.github.v3+json' },
+        cache: 'no-store',
+        signal: controller.signal,
+      }
+    );
+    clearTimeout(timer);
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data?.content) {
+        const decoded = JSON.parse(atob(String(data.content).replace(/\s/g, '')));
+        if (decoded?.url) {
+          cachedDynamicBridgeUrl = String(decoded.url).replace(/\/$/, '');
+          urls.push(cachedDynamicBridgeUrl);
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  if (cachedDynamicBridgeUrl && !urls.includes(cachedDynamicBridgeUrl)) {
+    urls.push(cachedDynamicBridgeUrl);
+  }
+  if (!urls.includes(FALLBACK_BRIDGE_URL)) {
+    urls.push(FALLBACK_BRIDGE_URL);
+  }
+
+  return urls;
+}
+
 export function createCleanStickerCanvas(
   sizePreset: LabelSizePreset,
   frame: FrameStyle,
@@ -130,9 +175,6 @@ export function printStickerNativeDialog(
   win.document.close();
 }
 
-/**
- * Builds the 1-bit monochrome raster for Phomemo M250.
- */
 export function buildPhomemoM250Raster(
   sizePreset: LabelSizePreset,
   frame: FrameStyle,
@@ -197,6 +239,56 @@ export class WebBluetoothNotSupportedError extends Error {
   }
 }
 
+export function submitPrintViaLocalForm(
+  sizePreset: LabelSizePreset,
+  frame: FrameStyle,
+  elements: StickerElement[],
+  copies = 1,
+  protocolMode: M250ProtocolMode = 'm-series-esc',
+  hostIp = '192.168.18.7:5173'
+): void {
+  const padTo72 = protocolMode !== 'm220-exact';
+  const { raster, widthBytes, heightLines } = buildPhomemoM250Raster(
+    sizePreset,
+    frame,
+    elements,
+    padTo72
+  );
+  const rasterBase64 = uint8ToBase64(raster);
+
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = `http://${hostIp}/api/print-m250-form`;
+  form.style.display = 'none';
+
+  const fields: Record<string, string> = {
+    rasterBase64,
+    widthBytes: String(widthBytes),
+    heightLines: String(heightLines),
+    copies: String(copies),
+    protocolMode,
+    returnUrl: window.location.href,
+  };
+
+  for (const [k, v] of Object.entries(fields)) {
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = k;
+    input.value = v;
+    form.appendChild(input);
+  }
+
+  document.body.appendChild(form);
+  form.submit();
+  setTimeout(() => {
+    try {
+      document.body.removeChild(form);
+    } catch {
+      // ignore
+    }
+  }, 2000);
+}
+
 export function encodeStickerStateForHandoff(
   sizeId: string,
   frame: FrameStyle,
@@ -245,18 +337,13 @@ export async function checkPrinterBridgeStatus(): Promise<{
   connected: boolean;
   battery: number | null;
 }> {
-  const endpoints = [
-    ...(location.hostname === 'localhost' || location.hostname.startsWith('192.168.')
-      ? ['/api/printer-status']
-      : []),
-    `${HTTPS_BRIDGE_URL}/api/printer-status`,
-  ];
+  const baseUrls = await resolveLiveBridgeUrls();
 
-  for (const ep of endpoints) {
+  for (const base of baseUrls) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 2500);
-      const r = await fetch(ep, { signal: controller.signal });
+      const timer = setTimeout(() => controller.abort(), 3000);
+      const r = await fetch(`${base}/api/printer-status`, { signal: controller.signal });
       clearTimeout(timer);
       if (r.ok) {
         const d = await r.json();
@@ -272,9 +359,7 @@ export async function checkPrinterBridgeStatus(): Promise<{
 }
 
 /**
- * Universal Bluetooth printing for Phomemo M250 from ANY browser (Yandex Browser, Safari, Chrome, Bluefy):
- * 1) First tries the active HTTPS / local Bluetooth bridge to COM9 (works in Yandex Browser & Safari without any popups!).
- * 2) If bridge is offline (PC is off), uses direct Web Bluetooth from the phone!
+ * Universal Bluetooth printing for Phomemo M250 from ANY browser (Yandex Browser, Safari, Chrome, Bluefy)
  */
 export async function printDirectBlePhomemoM250(
   sizePreset: LabelSizePreset,
@@ -293,18 +378,13 @@ export async function printDirectBlePhomemoM250(
   );
   const rasterBase64 = uint8ToBase64(raster);
 
-  // 1. Try active Bluetooth Bridge (local or HTTPS tunnel) first so Yandex Browser & Safari print immediately!
-  const bridgeEndpoints = [
-    ...(location.hostname === 'localhost' || location.hostname.startsWith('192.168.')
-      ? ['/api/print-m250']
-      : []),
-    `${HTTPS_BRIDGE_URL}/api/print-m250`,
-  ];
+  // 1. Dynamically resolve current live HTTPS bridge URLs from GitHub API and try printing!
+  const baseUrls = await resolveLiveBridgeUrls();
 
-  for (const endpoint of bridgeEndpoints) {
+  for (const base of baseUrls) {
     try {
       onStatus?.('Передача этикетки по Bluetooth на Phomemo M250...');
-      const resp = await fetch(endpoint, {
+      const resp = await fetch(`${base}/api/print-m250`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -324,7 +404,7 @@ export async function printDirectBlePhomemoM250(
         return;
       }
     } catch {
-      // Bridge not reachable, continue to direct Web Bluetooth
+      // Try next bridge URL
     }
   }
 

@@ -9,6 +9,7 @@ import {
   Printer,
   Share2,
   Sparkles,
+  Wifi,
   X,
 } from 'lucide-react';
 import { DOTS_PER_MM } from '../data/labelSizes';
@@ -20,6 +21,7 @@ import {
   prepareStickerAssets,
   printDirectBlePhomemoM250,
   printStickerNativeDialog,
+  submitPrintViaLocalForm,
   WebBluetoothNotSupportedError,
 } from '../utils/phomemoPrinter';
 
@@ -264,6 +266,22 @@ export const PrintSheetModal: React.FC<PrintSheetModalProps> = ({
               {errorMsg && <div className="font-bold text-slate-900">{errorMsg}</div>}
               {showBrowserBleHelp && (
                 <div className="flex flex-col gap-2">
+                  <button
+                    onClick={() =>
+                      submitPrintViaLocalForm(
+                        sizePreset,
+                        frame,
+                        elements,
+                        copies,
+                        protocolMode,
+                        '192.168.18.7:5173'
+                      )
+                    }
+                    className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs flex items-center justify-center gap-2 shadow-sm active:scale-95"
+                  >
+                    <Wifi className="w-4 h-4" />
+                    <span>Печать по домашнему Wi-Fi (192.168.18.7)</span>
+                  </button>
                   {isAndroid ? (
                     <a
                       href={chromeIntentUrl}

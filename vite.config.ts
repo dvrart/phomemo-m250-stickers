@@ -1,6 +1,6 @@
 import { defineConfig, Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
-import { execFile } from 'node:child_process';
+import { ChildProcess, execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import querystring from 'node:querystring';
@@ -9,6 +9,95 @@ const stickerStore = new Map<string, { buffer: Buffer; fileName: string }>();
 
 // Pure ASCII path inside project root to avoid Windows Cyrillic username encoding issues in PowerShell
 const SAFE_JOB_FILE = path.resolve('C:/Projects/olha/.m250_print_job.bin').replace(/\\/g, '/');
+const CLOUDFLARED_BIN = path.resolve('C:/Projects/olha/cloudflared.exe').replace(/\\/g, '/');
+
+let currentTunnelUrl = '';
+let tunnelProc: ChildProcess | null = null;
+let isRestartingTunnel = false;
+
+function publishTunnelUrlToGithub(tunnelUrl: string) {
+  const payload = JSON.stringify({
+    url: tunnelUrl,
+    localUrl: 'http://192.168.18.7:5173',
+    updatedAt: new Date().toISOString(),
+  });
+  const base64Content = Buffer.from(payload, 'utf8').toString('base64');
+
+  // Check if bridge.json already exists on gh-pages to get its sha
+  execFile(
+    'gh',
+    ['api', 'repos/dvrart/phomemo-m250-stickers/contents/bridge.json?ref=gh-pages', '--jq', '.sha'],
+    { timeout: 10000 },
+    (err, stdout) => {
+      const sha = !err && stdout ? stdout.trim() : '';
+      const args = [
+        'api',
+        '-X',
+        'PUT',
+        'repos/dvrart/phomemo-m250-stickers/contents/bridge.json',
+        '-f',
+        'message=Update live M250 HTTPS bridge URL',
+        '-f',
+        'branch=gh-pages',
+        '-f',
+        `content=${base64Content}`,
+      ];
+      if (sha && !sha.includes('Not Found')) {
+        args.push('-f', `sha=${sha}`);
+      }
+      execFile('gh', args, { timeout: 15000 }, (putErr) => {
+        if (!putErr) {
+          console.log(`[M250 Bridge] Published live HTTPS bridge URL to GitHub: ${tunnelUrl}`);
+        }
+      });
+    }
+  );
+}
+
+function startAutoHealingCloudflareTunnel() {
+  if (!fs.existsSync(CLOUDFLARED_BIN) || isRestartingTunnel) return;
+  isRestartingTunnel = true;
+
+  if (tunnelProc) {
+    try {
+      tunnelProc.kill();
+    } catch {
+      // ignore
+    }
+    tunnelProc = null;
+  }
+
+  setTimeout(() => {
+    isRestartingTunnel = false;
+    const proc = spawn(CLOUDFLARED_BIN, ['tunnel', '--url', 'http://localhost:5173'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    tunnelProc = proc;
+
+    const handleLog = (chunk: Buffer) => {
+      const text = chunk.toString('utf8');
+      const match = text.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+      if (match && match[0] !== currentTunnelUrl) {
+        currentTunnelUrl = match[0];
+        console.log(`[M250 Bridge] Active Cloudflare HTTPS Tunnel: ${currentTunnelUrl}`);
+        publishTunnelUrlToGithub(currentTunnelUrl);
+      }
+      // If PC woke from sleep and Quick Tunnel expired, automatically restart it!
+      if (text.includes('Unauthorized: Tunnel not found')) {
+        console.log('[M250 Bridge] Tunnel expired after sleep, restarting cloudflared...');
+        startAutoHealingCloudflareTunnel();
+      }
+    };
+
+    proc.stdout?.on('data', handleLog);
+    proc.stderr?.on('data', handleLog);
+    proc.on('exit', () => {
+      if (!isRestartingTunnel) {
+        setTimeout(() => startAutoHealingCloudflareTunnel(), 3000);
+      }
+    });
+  }, 800);
+}
 
 function executeM250SerialPrint(
   rasterBuffer: Buffer,
@@ -116,10 +205,11 @@ function phomemoM250BridgePlugin(): Plugin {
   return {
     name: 'phomemo-m250-bridge',
     configureServer(server) {
+      startAutoHealingCloudflareTunnel();
+
       server.middlewares.use((req, res, next) => {
         const url = req.url || '';
 
-        // Enable CORS & Private Network Access so https://dvrart.github.io can also reach local bridge when allowed
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -162,7 +252,9 @@ try {
             (err, stdout) => {
               res.setHeader('Content-Type', 'application/json');
               if (err) {
-                res.end(JSON.stringify({ ok: false, connected: false }));
+                res.end(
+                  JSON.stringify({ ok: false, connected: false, tunnelUrl: currentTunnelUrl })
+                );
                 return;
               }
               const out = stdout.trim();
@@ -178,6 +270,7 @@ try {
                   port: 'COM9',
                   model: 'Phomemo M250',
                   battery,
+                  tunnelUrl: currentTunnelUrl,
                 })
               );
             }
@@ -294,7 +387,7 @@ try {
           return;
         }
 
-        // 4. Form POST to /api/print-m250-form (works from HTTPS dvrart.github.io in Yandex Browser / Safari!)
+        // 4. Form POST to /api/print-m250-form (works over local Wi-Fi http://192.168.18.7:5173 from any browser!)
         if (req.method === 'POST' && url === '/api/print-m250-form') {
           let body = '';
           req.on('data', (chunk) => {
@@ -366,5 +459,6 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
+    allowedHosts: true,
   },
 });

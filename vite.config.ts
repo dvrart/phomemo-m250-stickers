@@ -122,7 +122,12 @@ $raster = [System.IO.File]::ReadAllBytes('${SAFE_JOB_FILE}')
 $sp = New-Object System.IO.Ports.SerialPort '${cleanPort}', 115200, 'None', 8, 'One'
 $sp.WriteTimeout = 10000
 $sp.ReadTimeout = 2000
-$sp.Open()
+try {
+  $sp.Open()
+} catch {
+  Start-Sleep -Milliseconds 600
+  $sp.Open()
+}
 try {
   for ($c = 0; $c -lt ${numCopies}; $c++) {
     if ($${isEscMode ? 'true' : 'false'}) {

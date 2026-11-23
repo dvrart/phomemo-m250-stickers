@@ -4,7 +4,7 @@ import { renderStickerToCanvas } from './thermalCanvasRenderer';
 
 export const M250_HEAD_WIDTH_BYTES = 72;
 
-export const FALLBACK_BRIDGE_URL = 'https://edt-resistance-scenarios-placing.trycloudflare.com';
+export const FALLBACK_BRIDGE_URL = 'https://firms-chemicals-bradley-meat.trycloudflare.com';
 
 export type M250ProtocolMode = 'm-series-esc' | 'm250-72byte' | 'm220-exact';
 
@@ -380,6 +380,8 @@ export async function printDirectBlePhomemoM250(
 
   // 1. Dynamically resolve current live HTTPS bridge URLs from GitHub API and try printing!
   const baseUrls = await resolveLiveBridgeUrls();
+  let bridgeServerReached = false;
+  let lastBridgeError = '';
 
   for (const base of baseUrls) {
     try {
@@ -396,6 +398,7 @@ export async function printDirectBlePhomemoM250(
           port: 'COM9',
         }),
       });
+      bridgeServerReached = true;
       const data = await resp.json();
       if (resp.ok && data.ok) {
         onStatus?.(
@@ -403,9 +406,19 @@ export async function printDirectBlePhomemoM250(
         );
         return;
       }
+      if (data?.error) {
+        lastBridgeError = String(data.error);
+      }
     } catch {
       // Try next bridge URL
     }
+  }
+
+  // If the bridge server responded, but COM9 could not reach the physical printer:
+  if (bridgeServerReached && lastBridgeError) {
+    throw new Error(
+      'Принтер Phomemo M250 не ответил по Bluetooth (тайм-аут связи). Проверьте: 1) Включён ли принтер (он автоматически засыпает через несколько минут простоя — нажмите кнопку питания); 2) Не занят ли Bluetooth принтера приложением Print Master на телефоне.'
+    );
   }
 
   // 2. Direct Autonomous Web Bluetooth (when PC is off)

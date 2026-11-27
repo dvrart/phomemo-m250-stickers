@@ -3,3 +3,7 @@ dist
 .m250_print_job.bin
 cloudflared.exe
 *.local
+.env
+.env.*
+.devin/config.local.json
+tsconfig.tsbuildinfo
